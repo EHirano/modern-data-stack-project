@@ -33,12 +33,20 @@ def ingest_data():
 
         return files_to_download
 
-    ingest_data_from_sftp_to_s3 = SFTPToS3Operator.partial().expand_kwargs(
-        extract_files_to_download()
-    )
+    ingest_data_from_sftp_to_s3 = SFTPToS3Operator.partial(
+            s3_conn_id=
+            use_temp_file=True
+        ).expand_kwargs(extract_files_to_download())
 
     create_glue_partitions = AWSAthenaOperator()
 
-    create_three_months_old_glue_partition = AWSAthenaOperator()
+    delete_three_months_old_glue_partition = AWSAthenaOperator(
+        task_id='delete_three_months_old_glue_partition',
+        query=QUERY_DROP_TABLE,
+        database=ATHENA_DATABASE,
+        output_location=f's3://{S3_BUCKET}/{S3_KEY}',
+        sleep_time=30,
+        max_tries=None,
+    )
 
     finish = EmptyOperator(task_id="finish")
