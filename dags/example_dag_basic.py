@@ -1,81 +1,122 @@
-vimport json
-from pendulum import datetime
+from datetime import datetime, timedelta
+import boto3
 
-from airflow.decorators import (
-    dag,
-    task,
-)  # DAG and task decorators for interfacing with the TaskFlow API
+from airflow.decorators import task
+from airflow.models.dag import DAG
+from airflow.operators.dummy import DummyOperator
+from airflow.operators.python import PythonOperator
+# from airflow.providers.amazon.aws.hooks.s3 import S3Hook
+from airflow.providers.amazon.aws.operators.glue import GlueJobOperator, GlueCrawlerOperator
+from airflow.providers.amazon.aws.sensors.glue import GlueJobSensor
+from airflow.utils.trigger_rule import TriggerRule
+from airflow.utils.task_group import TaskGroup
+
+from function.group_socios import 
+
+default_args = {
+    "owner": "Eduardo Lovera Hirano",
+    # 'on_failure_callback': notificate
+}
+
+BUCKET = 's3://dev-benice-companies-dataset/companies_raw/'
+
+@task(trigger_rule=TriggerRule.ALL_DONE)
+def glue_cleanup(crawler_name: str, job_name: str, db_name: str):
+    client: BaseClient = boto3.client("glue")
+
+    client.delete_crawler(Name=crawler_name)
+    client.delete_job(Name=job_name)
+    client.delete_database(Name=db_name)
+
+@task(task_id="query_read_results_from_s3")
+def read_companies_from_s3(query_execution_id):
+    dyf = glue_context.create_dynamic_frame_from_options(
+            connection_type = "s3",
+            connection_options = {
+                    "paths": [
+                            f"s3://{bucket}/{partition_string}"
+                        ]
+                },
+            format = "parquet"
+        )
+    
+    return dyf
 
 
-# When using the DAG decorator, The "dag_id" value defaults to the name of the function
-# it is decorating if not explicitly set. In this example, the "dag_id" value would be "example_dag_basic".
-@dag(
-    # This defines how often your DAG will run, or the schedule by which your DAG runs. In this case, this DAG
-    # will run daily
-    schedule="@daily",
-    # This DAG is set to run for the first time on January 1, 2023. Best practice is to use a static
-    # start_date. Subsequent DAG runs are instantiated based on the schedule
-    start_date=datetime(2023, 1, 1),
-    # When catchup=False, your DAG will only run the latest run that would have been scheduled. In this case, this means
-    # that tasks will not be run between January 1, 2023 and 30 mins ago. When turned on, this DAG's first
-    # run will be for the next 30 mins, per the its schedule
+@task(task_id="write_dataframe_to_s3")
+def write_dataframe_to_s3(df, glue_context, path):
+    try:
+        dyf = DynamicFrame.fromDF(df, glue_context, "dyf")
+
+        gc = GlueContext(SparkContext.getOrCreate())
+        gc.write_dynamic_frame.from_options(
+                frame=dyf,
+                connection_type="s3",
+                connection_options={
+                        "path": path,
+                        "partitionKeys": []
+                    },
+                format="parquet"
+            )
+        
+        return True
+    except Exception as e:
+        print("ERROR_WRITING_GROUPED_SOCIOS_DF", {}, f"Error: {e}")
+    
+
+with DAG(
+    dag_id="CompaniesGroupSocios",
+    description="version: 1.0.2",
+    default_args=default_args,
+    start_date=datetime(2024, 2, 2),
     catchup=False,
-    default_args={
-        "retries": 2,  # If a task fails, it will retry 2 times.
-    },
-    tags=["example"],
-)  # If set, this tag is shown in the DAG view of the Airflow UI
-def example_dag_basic():
-    """
-    ### Basic ETL Dag
-    This is a simple ETL data pipeline example that demonstrates the use of
-    the TaskFlow API using three simple tasks for extract, transform, and load.
-    For more information on Airflow's TaskFlow API, reference documentation here:
-    https://airflow.apache.org/docs/apache-airflow/stable/tutorial_taskflow_api.html
-    """
+    tags=["Companies", "Glue", "Socios", "Dev"],
+    # schedule_interval="30 * * * *",
+    max_active_runs=1,
+) as dag:
+    env_id
+    start = DummyOperator(task_id="start")
+    glue_crawler_config = {
+        "Name": glue_crawler_name,
+        "Role": role_arn,
+        "DatabaseName": glue_db_name,
+        "Targets": {
+            "S3Targets": [
+                {"Path": f"{bucket_name}/input"}
+            ]
+        }
+    }
 
-    @task()
-    def extract():
-        """
-        #### Extract task
-        A simple "extract" task to get data ready for the rest of the
-        pipeline. In this case, getting data is simulated by reading from a
-        hardcoded JSON string.
-        """
-        data_string = '{"1001": 301.27, "1002": 433.21, "1003": 502.22}'
+    
+    crawl_s3 = GlueCrawlerOperator(
+        task_id="crawl_s3_socios",
+        config=glue_crawler_config
+    )
 
-        order_data_dict = json.loads(data_string)
-        return order_data_dict
-
-    @task(
-        multiple_outputs=True
-    )  # multiple_outputs=True unrolls dictionaries into separate XCom values
-    def transform(order_data_dict: dict):
-        """
-        #### Transform task
-        A simple "transform" task which takes in the collection of order data and
-        computes the total order value.
-        """
-        total_order_value = 0
-
-        for value in order_data_dict.values():
-            total_order_value += value
-
-        return {"total_order_value": total_order_value}
-
-    @task()
-    def load(total_order_value: float):
-        """
-        #### Load task
-        A simple "load" task that takes in the result of the "transform" task and prints it out,
-        instead of saving it to end user review
-        """
-
-        print(f"Total order value is: {total_order_value:.2f}")
-
-    order_data = extract()
-    order_summary = transform(order_data)
-    load(order_summary["total_order_value"])
+    submit_glue_job = GlueJobOperator(
+        task_id="submit_glue_job",
+        job_name=group_socios,
+        script_location=f's3://{BUCKET}/group_socios.py,
+    )
 
 
-example_dag_basic()
+
+    end = DummyOperator(task_id="end")
+
+    (
+        start
+        >> load_glue_partitions
+        >> update_brokers_tracker_staging
+        >> merge_dimensions
+        >> merge_numeric_dimensions
+        >> insert_brokers_payload_fact
+        >> set_staging_as_processed1
+        >> insert_brokers_fact
+        >> set_staging_as_processed2
+        >> end
+    )
+    # start >> update_brokers_tracker_staging >> merge_dimensions >> merge_numeric_dimensions >> insert_brokers_fact >> set_staging_as_processed >> end
+
+    # start >> drop_dependants >> extract_brokers >> extract_login >> extract_capabilities >> extract_iugo >> transform >> populate_temporada >> log_last_pipeline_success >> end
+    # start >> merge_dimensions >> merge_numeric_dimensions >> insert_brokers_fact >> end
+# [END madman]
